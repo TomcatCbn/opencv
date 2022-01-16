@@ -48,6 +48,9 @@
 
 #include "opencv2/opencv_modules.hpp"
 
+#include <map>
+#include <string>
+
 namespace cv {
 namespace detail {
 
@@ -125,20 +128,21 @@ public:
     @param matches_info Found matches
     */
     CV_WRAP_AS(apply) void operator ()(const ImageFeatures &features1, const ImageFeatures &features2,
-                     CV_OUT MatchesInfo& matches_info) { match(features1, features2, matches_info); }
+                     CV_OUT MatchesInfo& matches_info, const cv::Mat image_mask1 = cv::Mat(), const cv::Mat image_mask2 = cv::Mat()) { match(features1, features2, matches_info, image_mask1, image_mask2); }
 
     /** @brief Performs images matching.
 
     @param features Features of the source images
     @param pairwise_matches Found pairwise matches
     @param mask Mask indicating which image pairs must be matched
+    @param pairwise_masks Mask indicating which features pairs mush be calculated the features matches.
 
     The function is parallelized with the TBB library.
 
     @sa detail::MatchesInfo
     */
     CV_WRAP_AS(apply2) void operator ()(const std::vector<ImageFeatures> &features, CV_OUT std::vector<MatchesInfo> &pairwise_matches,
-                     const cv::UMat &mask = cv::UMat());
+                     const cv::UMat &mask = cv::UMat(), const std::map<std::string, std::pair<cv::Mat, cv::Mat>> &pairwise_masks = {});
 
     /** @return True, if it's possible to use the same matcher instance in parallel, false otherwise
     */
@@ -159,7 +163,7 @@ protected:
     @param matches_info found matches
      */
     virtual void match(const ImageFeatures &features1, const ImageFeatures &features2,
-                       MatchesInfo& matches_info) = 0;
+                       MatchesInfo& matches_info, const Mat &image_mask1 = cv::Mat(), const Mat &image_mask2 = cv::Mat()) = 0;
 
     bool is_thread_safe_;
 };
@@ -190,7 +194,7 @@ public:
 
 protected:
 
-    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo &matches_info) CV_OVERRIDE;
+    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo &matches_info, const Mat &image_mask1 = cv::Mat(), const Mat &image_mask2 = cv::Mat()) CV_OVERRIDE;
     int num_matches_thresh1_;
     int num_matches_thresh2_;
     Ptr<FeaturesMatcher> impl_;
@@ -203,7 +207,7 @@ public:
                             int num_matches_thresh1 = 6, int num_matches_thresh2 = 6);
 
     void operator ()(const std::vector<ImageFeatures> &features, std::vector<MatchesInfo> &pairwise_matches,
-                     const cv::UMat &mask = cv::UMat());
+                     const cv::UMat &mask = cv::UMat(), const std::map<std::string, std::pair<cv::Mat, cv::Mat>> &pairwise_masks = {});
 
 
 protected:
@@ -240,7 +244,7 @@ public:
         full_affine_(full_affine) {}
 
 protected:
-    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo &matches_info) CV_OVERRIDE;
+    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo &matches_info, const Mat &image_mask1 = cv::Mat(), const Mat &image_mask2 = cv::Mat()) CV_OVERRIDE;
 
     bool full_affine_;
 };

@@ -40,6 +40,9 @@
 //
 //M*/
 
+#include <map>
+#include <string>
+#include <iostream>
 #include "precomp.hpp"
 
 #include "opencv2/core/opencl/ocl_defs.hpp"
@@ -65,9 +68,10 @@ struct DistIdxPair
 struct MatchPairsBody : ParallelLoopBody
 {
     MatchPairsBody(FeaturesMatcher &_matcher, const std::vector<ImageFeatures> &_features,
-                   std::vector<MatchesInfo> &_pairwise_matches, std::vector<std::pair<int,int> > &_near_pairs)
+                   std::vector<MatchesInfo> &_pairwise_matches, std::vector<std::pair<int,int> > &_near_pairs,
+                   const std::map<std::string, std::pair<cv::Mat, cv::Mat>> &_pairwise_masks = {})
             : matcher(_matcher), features(_features),
-              pairwise_matches(_pairwise_matches), near_pairs(_near_pairs) {}
+              pairwise_matches(_pairwise_matches), near_pairs(_near_pairs),  pairwise_masks(_pairwise_masks){}
 
     void operator ()(const Range &r) const CV_OVERRIDE
     {
@@ -81,7 +85,18 @@ struct MatchPairsBody : ParallelLoopBody
             int to = near_pairs[i].second;
             int pair_idx = from*num_images + to;
 
-            matcher(features[from], features[to], pairwise_matches[pair_idx]);
+            if (pairwise_masks.empty())
+            {
+                matcher(features[from], features[to], pairwise_matches[pair_idx]);
+            }
+            else
+            {
+                const std::string mapping = std::to_string(from) + std::to_string(to);
+                std::map<std::string, std::pair<cv::Mat, cv::Mat>>::const_iterator it_find = pairwise_masks.find(mapping);
+                // std::cout << "MatchPairsBody mapping " << mapping << ", contains = " << (it_find != pairwise_masks.end()) << it_find->second.first.size() << std::endl;
+                matcher(features[from], features[to], pairwise_matches[pair_idx], it_find->second.first, it_find->second.second);
+            }
+
             pairwise_matches[pair_idx].src_img_idx = from;
             pairwise_matches[pair_idx].dst_img_idx = to;
 
@@ -105,6 +120,7 @@ struct MatchPairsBody : ParallelLoopBody
     const std::vector<ImageFeatures> &features;
     std::vector<MatchesInfo> &pairwise_matches;
     std::vector<std::pair<int,int> > &near_pairs;
+    const std::map<std::string, std::pair<cv::Mat, cv::Mat>> &pairwise_masks;
 
 private:
     void operator =(const MatchPairsBody&);
@@ -122,7 +138,7 @@ class CpuMatcher CV_FINAL : public FeaturesMatcher
 {
 public:
     CpuMatcher(float match_conf) : FeaturesMatcher(true), match_conf_(match_conf) {}
-    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info) CV_OVERRIDE;
+    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info, const Mat &image_mask1 = cv::Mat(), const Mat &image_mask2 = cv::Mat()) CV_OVERRIDE;
 
 private:
     float match_conf_;
@@ -133,7 +149,7 @@ class GpuMatcher CV_FINAL : public FeaturesMatcher
 {
 public:
     GpuMatcher(float match_conf) : match_conf_(match_conf) {}
-    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info);
+    void match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info, Mat &image_mask1 = cv::Mat(), Mat &image_mask2 = cv::Mat());
 
     void collectGarbage();
 
@@ -146,7 +162,7 @@ private:
 #endif
 
 
-void CpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info)
+void CpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info, const Mat &image_mask1, const Mat &image_mask2)
 {
     CV_INSTRUMENT_REGION();
 
@@ -156,30 +172,31 @@ void CpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &feat
     matches_info.matches.clear();
 
     Ptr<cv::DescriptorMatcher> matcher;
-#if 0 // TODO check this
-    if (ocl::isOpenCLActivated())
-    {
-        matcher = makePtr<BFMatcher>((int)NORM_L2);
-    }
-    else
-#endif
-    {
-        Ptr<flann::IndexParams> indexParams = makePtr<flann::KDTreeIndexParams>();
-        Ptr<flann::SearchParams> searchParams = makePtr<flann::SearchParams>();
+    matcher = makePtr<BFMatcher>((int)NORM_L2, false);
+// #if 0 // TODO check this
+//     if (ocl::isOpenCLActivated())
+//     {
+//         matcher = makePtr<BFMatcher>((int)NORM_L2);
+//     }
+//     else
+// #endif
+//     {
+//         Ptr<flann::IndexParams> indexParams = makePtr<flann::KDTreeIndexParams>();
+//         Ptr<flann::SearchParams> searchParams = makePtr<flann::SearchParams>();
 
-        if (features2.descriptors.depth() == CV_8U)
-        {
-            indexParams->setAlgorithm(cvflann::FLANN_INDEX_LSH);
-            searchParams->setAlgorithm(cvflann::FLANN_INDEX_LSH);
-        }
+//         if (features2.descriptors.depth() == CV_8U)
+//         {
+//             indexParams->setAlgorithm(cvflann::FLANN_INDEX_LSH);
+//             searchParams->setAlgorithm(cvflann::FLANN_INDEX_LSH);
+//         }
 
-        matcher = makePtr<FlannBasedMatcher>(indexParams, searchParams);
-    }
+//         matcher = makePtr<FlannBasedMatcher>(indexParams, searchParams);
+//     }
     std::vector< std::vector<DMatch> > pair_matches;
     MatchesSet matches;
 
     // Find 1->2 matches
-    matcher->knnMatch(features1.descriptors, features2.descriptors, pair_matches, 2);
+    matcher->knnMatch(features1.descriptors, features2.descriptors, pair_matches, 2, image_mask1);
     for (size_t i = 0; i < pair_matches.size(); ++i)
     {
         if (pair_matches[i].size() < 2)
@@ -196,7 +213,7 @@ void CpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &feat
 
     // Find 2->1 matches
     pair_matches.clear();
-    matcher->knnMatch(features2.descriptors, features1.descriptors, pair_matches, 2);
+    matcher->knnMatch(features2.descriptors, features1.descriptors, pair_matches, 2, image_mask2);
     for (size_t i = 0; i < pair_matches.size(); ++i)
     {
         if (pair_matches[i].size() < 2)
@@ -211,7 +228,7 @@ void CpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &feat
 }
 
 #ifdef HAVE_OPENCV_CUDAFEATURES2D
-void GpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info)
+void GpuMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2, MatchesInfo& matches_info, const Mat &image_mask1, const Mat &image_mask2)
 {
     CV_INSTRUMENT_REGION();
 
@@ -336,7 +353,7 @@ MatchesInfo& MatchesInfo::operator =(const MatchesInfo &other)
 //////////////////////////////////////////////////////////////////////////////
 
 void FeaturesMatcher::operator ()(const std::vector<ImageFeatures> &features, std::vector<MatchesInfo> &pairwise_matches,
-                                  const UMat &mask)
+                                  const UMat &mask, const std::map<std::string, std::pair<cv::Mat, cv::Mat>> &pairwise_masks)
 {
     const int num_images = static_cast<int>(features.size());
 
@@ -353,7 +370,7 @@ void FeaturesMatcher::operator ()(const std::vector<ImageFeatures> &features, st
 
     pairwise_matches.clear(); // clear history values
     pairwise_matches.resize(num_images * num_images);
-    MatchPairsBody body(*this, features, pairwise_matches, near_pairs);
+    MatchPairsBody body(*this, features, pairwise_matches, near_pairs, pairwise_masks);
 
     if (is_thread_safe_)
         parallel_for_(Range(0, static_cast<int>(near_pairs.size())), body);
@@ -393,11 +410,11 @@ Ptr<BestOf2NearestMatcher> BestOf2NearestMatcher::create(bool try_use_gpu, float
 
 
 void BestOf2NearestMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2,
-                                  MatchesInfo &matches_info)
+                                  MatchesInfo &matches_info, const Mat &image_mask1, const Mat &image_mask2)
 {
     CV_INSTRUMENT_REGION();
 
-    (*impl_)(features1, features2, matches_info);
+    (*impl_)(features1, features2, matches_info, image_mask1, image_mask2);
 
     // Check if it makes sense to find homography
     if (matches_info.matches.size() < static_cast<size_t>(num_matches_thresh1_))
@@ -485,7 +502,7 @@ BestOf2NearestRangeMatcher::BestOf2NearestRangeMatcher(int range_width, bool try
 
 
 void BestOf2NearestRangeMatcher::operator ()(const std::vector<ImageFeatures> &features, std::vector<MatchesInfo> &pairwise_matches,
-                                  const UMat &mask)
+                                  const UMat &mask, const std::map<std::string, std::pair<cv::Mat, cv::Mat>>&)
 {
     const int num_images = static_cast<int>(features.size());
 
@@ -512,7 +529,7 @@ void BestOf2NearestRangeMatcher::operator ()(const std::vector<ImageFeatures> &f
 
 
 void AffineBestOf2NearestMatcher::match(const ImageFeatures &features1, const ImageFeatures &features2,
-                                        MatchesInfo &matches_info)
+                                        MatchesInfo &matches_info, const Mat &/*image_mask1*/, const Mat &/*image_mask2*/)
 {
     (*impl_)(features1, features2, matches_info);
 
